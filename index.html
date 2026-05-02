@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>エリア・スキャナー いぶき野3丁目 オンライン</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+    <style>
+        body { margin: 0; padding: 0; overflow: hidden; background-color: #000; color: white; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        #map { width: 100vw; height: 100vh; z-index: 1; background: #000; }
+        
+        #ui-layer { position: absolute; inset: 0; z-index: 10; pointer-events: none; display: flex; flex-direction: column; justify-content: space-between; }
+        .pointer-events-auto { pointer-events: auto; }
+        .glass-panel { background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.2); }
+        
+        /* プレイヤーのマーカー */
+        .player-marker {
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            position: relative;
+            box-shadow: 0 0 15px currentColor;
+            border: 2px solid white;
+            transition: all 0.3s ease-out; /* 高精度に追従するため素早く動かす */
+            z-index: 1000;
+        }
+        .player-marker::after {
+            content: '';
+            position: absolute;
+            top: -10px; left: -10px; right: -10px; bottom: -10px;
+            border: 2px solid currentColor;
+            border-radius: 50%;
+            animation: pulse 1s infinite;
+        }
+        @keyframes pulse {
+            0% { transform: scale(0.5); opacity: 1; }
+            100% { transform: scale(2.5); opacity: 0; }
+        }
+
+        /* セルのスタイル - 50cm四方 */
+        .grid-cell { stroke-width: 0; mix-blend-mode: multiply; }
+        
+        #ranking-list::-webkit-scrollbar { display: none; }
+        #ranking-list { -ms-overflow-style: none; scrollbar-width: none; }
+        
+        .timer-hurry { color: #ef4444; animation: blink 1s infinite; }
+        @keyframes blink { 50% { opacity: 0.5; } }
+    </style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<!-- UIレイヤー (プレイ中) -->
+<div id="ui-layer" class="hidden">
+    <div class="p-3 w-full flex justify-between items-start gap-2">
+        <div class="flex flex-col gap-2">
+            <div class="glass-panel px-4 py-3 rounded-xl text-sm font-bold text-gray-200 border-l-4 border-l-green-500 shadow-lg pointer-events-auto min-w-[140px]">
+                📍 いぶき野3丁目<br>
+                <div class="text-xs text-gray-400 mt-1">REMAINING TIME</div>
+                <div id="timer-display" class="text-3xl font-black text-white tracking-widest">--:--</div>
+            </div>
+        </div>
+
+        <div class="glass-panel p-3 rounded-xl pointer-events-auto w-48 max-h-48 overflow-y-auto" id="ranking-list">
+            <h3 class="text-[10px] text-gray-400 font-bold mb-2 tracking-widest text-center border-b border-gray-700 pb-1">50cm² BATTLE RANKING</h3>
+            <div id="ranking-container" class="flex flex-col gap-1">
+                <div class="text-center text-sm text-gray-500">Waiting...</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="p-4 w-full flex flex-col items-center gap-3 pb-8">
+        <div id="status-message" class="glass-panel px-6 py-4 rounded-full text-sm font-bold text-white flex items-center gap-2 shadow-lg max-w-full text-center">
+            <div class="w-2 h-2 bg-yellow-400 rounded-full animate-pulse"></div>
+            GPS信号を待機中...
+        </div>
+    </div>
+</div>
+
+<!-- ロード画面 -->
+<div id="loading-screen" class="absolute inset-0 bg-gray-950 z-50 flex flex-col items-center justify-center transition-opacity duration-500">
+    <h1 class="text-5xl font-black mb-2 tracking-widest text-white drop-shadow-md text-center">AREA<br>SCANNER</h1>
+    <p id="loading-text" class="text-gray-400 animate-pulse mt-8">Firebaseサーバーに接続中...</p>
+    <div class="w-12 h-12 border-4 border-green-500 border-t-transparent rounded-full animate-spin mt-4"></div>
+</div>
+
+<!-- モード選択画面 -->
+<div id="setup-screen" class="absolute inset-0 bg-gray-900/95 backdrop-blur-sm z-40 flex flex-col items-center justify-center hidden">
+    <div class="bg-gray-800 p-8 rounded-2xl shadow-2xl max-w-sm w-full border border-gray-700">
+        <h2 class="text-2xl font-black text-center text-white mb-2">和泉市いぶき野3丁目</h2>
+        <p class="text-center text-green-400 font-bold mb-6">50cm角 完全オンライン陣取り</p>
+        
+        <div id="player-info" class="flex items-center justify-center gap-3 mb-4 bg-gray-900 p-3 rounded-lg border border-gray-700">
+            <span class="text-sm text-gray-400">あなたの部隊カラー:</span>
+            <div id="color-preview" class="w-6 h-6 rounded-full border-2 border-white shadow-[0_0_10px_currentColor]"></div>
+        </div>
+
+        <div class="text-xs text-center mb-6 text-green-400 bg-green-400/10 p-2 rounded border border-green-400/30">
+            🟢 サーバー接続完了
+        </div>
+
+        <h3 class="text-sm text-gray-400 font-bold mb-3 text-center">作戦時間を選択してください</h3>
+        <div class="grid grid-cols-2 gap-3 mb-6">
+            <button class="mode-btn bg-gray-700 hover:bg-green-600 text-white py-4 rounded-xl font-bold text-xl transition-colors border border-gray-600 shadow-md" data-time="3">3分</button>
+            <button class="mode-btn bg-gray-700 hover:bg-green-600 text-white py-4 rounded-xl font-bold text-xl transition-colors border border-gray-600 shadow-md" data-time="5">5分</button>
+            <button class="mode-btn bg-gray-700 hover:bg-green-600 text-white py-4 rounded-xl font-bold text-xl transition-colors border border-gray-600 shadow-md" data-time="10">10分</button>
+            <button class="mode-btn bg-gray-700 hover:bg-blue-600 text-white py-4 rounded-xl font-bold text-lg transition-colors border border-gray-600 shadow-md" data-time="0">無制限</button>
+        </div>
+        <p class="text-xs text-center text-yellow-400 font-bold">※歩いてプレイします。周囲の安全に注意してください。</p>
+    </div>
+</div>
+
+<!-- リザルト画面 -->
+<div id="result-screen" class="absolute inset-0 bg-black/90 backdrop-blur-md z-50 flex flex-col items-center justify-center hidden pointer-events-auto">
+    <h1 class="text-6xl font-black text-white mb-2 tracking-widest">TIME UP</h1>
+    <p class="text-xl text-green-400 font-bold mb-8">作戦終了</p>
+    <div class="glass-panel p-6 rounded-2xl w-full max-w-sm flex flex-col items-center mb-8">
+        <span class="text-gray-400 text-sm font-bold mb-2">あなたの制圧マス数 (1マス=50cm角)</span>
+        <div class="text-5xl font-black text-white mb-2"><span id="final-score">0</span><span class="text-lg text-gray-400 ml-1">マス</span></div>
+        <div id="final-rank" class="text-xl font-bold text-yellow-400">Rank: -</div>
+    </div>
+    <button id="btn-restart" class="bg-white text-black hover:bg-gray-200 px-10 py-4 rounded-full font-black text-xl transition-transform hover:scale-105 shadow-lg shadow-white/20">もう一度プレイ</button>
+</div>
+
+<script type="module">
+    // Firebase v11 (Realtime Database対応版) をインポート
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+    import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { getDatabase, ref, set, get, child, onChildAdded, onChildChanged, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-database.js";
+
+    // =========================================================================
+    // 【ユーザー指定のFirebase設定】
+    // =========================================================================
+    const firebaseConfig = {
+        apiKey: "AIzaSyAfjTWeL71syzo7SNpym7ATcbrq6i7JfXQ",
+        authDomain: "game-server-df061.firebaseapp.com",
+        databaseURL: "https://game-server-df061-default-rtdb.firebaseio.com",
+        projectId: "game-server-df061",
+        storageBucket: "game-server-df061.firebasestorage.app",
+        messagingSenderId: "475396427934",
+        appId: "1:475396427934:web:5106a6210aa51e3b8f6b8f"
+    };
+
+    let app, auth, db;
+    let myUid = null;
+
+    // --- ゲーム設定 ---
+    // 50cm四方 (緯度経度の0.000005度)
+    const CELL_SIZE = 0.000005; 
+    // 入室順のカラーパレット
+    const COLORS = ['#3B82F6', '#EF4444', '#EAB308', '#22C55E', '#F97316', '#A855F7', '#06B6D4', '#EC4899'];
+    let myColor = '#FFFFFF';
+    
+    // --- いぶき野3丁目 座標設定 ---
+    const CENTER_LAT = 34.465500;
+    const CENTER_LNG = 135.457500; 
+    const PLAY_AREA = { 
+        north: 34.469500, 
+        south: 34.461500, 
+        west: 135.453500, 
+        east: 135.462000  
+    };
+
+    // 状態変数
+    let map = null;
+    let playerMarker = null;
+    let watchId = null;
+    let isPlaying = false;
+    let remainingSeconds = 0;
+    let timerInterval = null;
+    
+    // { gridId: { rect, owner, color } }
+    const gridData = new Map();
+    let colorScores = {};
+
+    const ui = {
+        loading: document.getElementById('loading-screen'),
+        setup: document.getElementById('setup-screen'),
+        game: document.getElementById('ui-layer'),
+        result: document.getElementById('result-screen'),
+        status: document.getElementById('status-message'),
+        timer: document.getElementById('timer-display'),
+        ranking: document.getElementById('ranking-container'),
+        colorPreview: document.getElementById('color-preview'),
+        finalScore: document.getElementById('final-score'),
+        finalRank: document.getElementById('final-rank'),
+        loadingText: document.getElementById('loading-text')
+    };
+    const btns = {
+        restart: document.getElementById('btn-restart'),
+        modes: document.querySelectorAll('.mode-btn')
+    };
+
+    // --- システム初期化 (Firebase RTDB接続) ---
+    async function initSystem() {
+        try {
+            app = initializeApp(firebaseConfig);
+            auth = getAuth(app);
+            db = getDatabase(app);
+            
+            onAuthStateChanged(auth, async (user) => {
+                if (user && !isPlaying) {
+                    myUid = user.uid;
+                    await assignPlayerColor(myUid);
+                    showSetupScreen();
+                }
+            });
+            
+            await signInAnonymously(auth);
+        } catch (error) {
+            console.error("Firebase Connection Error:", error);
+            ui.loadingText.innerHTML = `<span class="text-red-500">通信エラーが発生しました。設定を確認してください。</span>`;
+        }
+    }
+
+    async function assignPlayerColor(uid) {
+        const playersRef = ref(db, 'players');
+        const snapshot = await get(playersRef);
+        
+        let playerCount = 0;
+        let existingColor = null;
+
+        if (snapshot.exists()) {
+            const players = snapshot.val();
+            playerCount = Object.keys(players).length;
+            if (players[uid] && players[uid].color) {
+                existingColor = players[uid].color;
+            }
+        }
+
+        if (existingColor) {
+            myColor = existingColor;
+        } else {
+            // 入室順に色を割り当て
+            myColor = COLORS[playerCount % COLORS.length];
+            await set(child(playersRef, uid), {
+                color: myColor,
+                joinedAt: serverTimestamp()
+            });
+        }
+    }
+
+    function showSetupScreen() {
+        ui.colorPreview.style.backgroundColor = myColor;
+        ui.colorPreview.style.color = myColor;
+        ui.loading.classList.add('hidden');
+        ui.setup.classList.remove('hidden');
+    }
+
+    // --- ゲーム開始 ---
+    function startGame(minutes) {
+        ui.setup.classList.add('hidden');
+        ui.result.classList.add('hidden');
+        ui.game.classList.remove('hidden');
+        
+        isPlaying = true;
+        
+        initMap(CENTER_LAT, CENTER_LNG);
+        listenToCells(); // オンライン同期開始
+        startGPS();      // 超高精度GPS開始
+        
+        if (minutes > 0) {
+            remainingSeconds = minutes * 60;
+            updateTimerDisplay();
+            timerInterval = setInterval(countdownTimer, 1000);
+        } else {
+            ui.timer.innerText = "無限";
+            ui.timer.classList.remove('timer-hurry');
+        }
+    }
+
+    function endGame() {
+        isPlaying = false;
+        clearInterval(timerInterval);
+        if (watchId) navigator.geolocation.clearWatch(watchId);
+        
+        ui.game.classList.add('hidden');
+        ui.result.classList.remove('hidden');
+        
+        const myScore = colorScores[myColor] || 0;
+        ui.finalScore.innerText = myScore;
+        
+        const sorted = Object.entries(colorScores).sort((a, b) => b[1] - a[1]);
+        let rank = sorted.findIndex(([color, _]) => color === myColor) + 1;
+        if (myScore === 0) rank = "-";
+        
+        ui.finalRank.innerText = `Rank: ${rank}位`;
+        if (rank === 1 && myScore > 0) ui.finalRank.innerText += " 🏆";
+    }
+
+    function countdownTimer() {
+        if (!isPlaying) return;
+        remainingSeconds--;
+        updateTimerDisplay();
+        if (remainingSeconds <= 30) ui.timer.classList.add('timer-hurry');
+        if (remainingSeconds <= 0) endGame();
+    }
+
+    function updateTimerDisplay() {
+        const m = Math.floor(remainingSeconds / 60);
+        const s = remainingSeconds % 60;
+        ui.timer.innerText = `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+    }
+
+    // --- 地図処理 (極限の軽量化) ---
+    function initMap(lat, lng) {
+        if (map) return;
+
+        // 負荷軽減: プレイエリアのみの境界線を定義
+        const mapBounds = L.latLngBounds([PLAY_AREA.south, PLAY_AREA.west], [PLAY_AREA.north, PLAY_AREA.east]);
+
+        map = L.map('map', { 
+            zoomControl: false, 
+            doubleClickZoom: false,
+            maxBounds: mapBounds,      // スクロール制限
+            maxBoundsViscosity: 1.0,   
+            minZoom: 19                
+        }).setView([lat, lng], 21);    
+
+        // 負荷軽減: プレイエリア外の地図画像はリクエスト（ダウンロード）しない
+        L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png', {
+            attribution: "<a href='https://maps.gsi.go.jp/development/ichiran.html'>国土地理院</a>",
+            maxNativeZoom: 18, 
+            maxZoom: 23,
+            bounds: mapBounds          // この範囲のタイルしか読まない
+        }).addTo(map);
+
+        // 外側を黒くマスク
+        const outerBounds = [[-90, -180], [90, -180], [90, 180], [-90, 180]];
+        const innerBounds = [
+            [PLAY_AREA.south, PLAY_AREA.west],
+            [PLAY_AREA.north, PLAY_AREA.west],
+            [PLAY_AREA.north, PLAY_AREA.east],
+            [PLAY_AREA.south, PLAY_AREA.east]
+        ];
+        L.polygon([outerBounds, innerBounds], {
+            color: 'black', fillColor: '#111', fillOpacity: 1, weight: 0
+        }).addTo(map);
+
+        L.rectangle([[PLAY_AREA.south, PLAY_AREA.west], [PLAY_AREA.north, PLAY_AREA.east]], {
+            color: "#ff0055", weight: 3, fillOpacity: 0.0, dashArray: "10, 10"
+        }).addTo(map);
+
+        const playerIcon = L.divIcon({
+            className: 'custom-div-icon',
+            html: `<div class='player-marker' style='color: ${myColor}; background-color: ${myColor}'></div>`,
+            iconSize: [16, 16], iconAnchor: [8, 8]
+        });
+        playerMarker = L.marker([lat, lng], {icon: playerIcon, zIndexOffset: 1000}).addTo(map);
+    }
+
+    function isInsidePlayArea(lat, lng) {
+        return lat >= PLAY_AREA.south && lat <= PLAY_AREA.north && lng >= PLAY_AREA.west && lng <= PLAY_AREA.east;
+    }
+
+    function updatePosition(lat, lng, accuracy) {
+        if (!isPlaying || !playerMarker) return;
+
+        playerMarker.setLatLng([lat, lng]);
+        map.panTo([lat, lng], { animate: true, duration: 1.0 }); // 常に現在地を中心に
+
+        if (!isInsidePlayArea(lat, lng)) {
+            ui.status.innerHTML = `<span class="text-red-400">⚠️ エリア外 (いぶき野3丁目に向かってください)</span>`;
+            return;
+        }
+
+        ui.status.innerHTML = `<div class="w-3 h-3 rounded-full" style="background-color: ${myColor}"></div> <span class="text-white">高精度スキャン中 (誤差: ${Math.round(accuracy)}m)</span>`;
+
+        const cx = Math.floor(lng / CELL_SIZE);
+        const cy = Math.floor(lat / CELL_SIZE);
+        
+        // 50cm四方は非常に狭いため、自分がいるマスとその周囲をまとめて制圧する (3x3マス)
+        for(let dy = -1; dy <= 1; dy++) {
+            for(let dx = -1; dx <= 1; dx++) {
+                const tx = cx + dx;
+                const ty = cy + dy;
+                const gridId = `${tx}_${ty}`;
+
+                // 既に自分の陣地なら通信も描画もしない（大幅な軽量化）
+                if (gridData.has(gridId) && gridData.get(gridId).owner === myUid) continue;
+
+                // Firebase Realtime Database に書き込み
+                const cellRef = child(ref(db, 'cells'), gridId);
+                set(cellRef, { 
+                    owner: myUid, 
+                    color: myColor, 
+                    x: tx, 
+                    y: ty, 
+                    timestamp: serverTimestamp() 
+                }).catch(e => console.error(e));
+            }
+        }
+    }
+
+    // --- 【限界精度】GPSフィルタリング ---
+    function startGPS() {
+        if (!navigator.geolocation) { 
+            ui.status.innerHTML = `<span class="text-red-500 font-bold">GPS非対応の端末です</span>`;
+            return; 
+        }
+
+        ui.status.innerHTML = `<div class="w-2 h-2 bg-yellow-400 rounded-full animate-pulse"></div> 🛰️ 衛星を捕捉中... 開けた場所へ！`;
+
+        const options = {
+            enableHighAccuracy: true, // 最高精度を要求
+            timeout: 10000,           
+            maximumAge: 0             // キャッシュを一切使わない
+        };
+
+        watchId = navigator.geolocation.watchPosition(
+            (position) => {
+                const lat = position.coords.latitude;
+                const lng = position.coords.longitude;
+                const accuracy = position.coords.accuracy;
+
+                // --- 【限界精度フィルター】 ---
+                // 誤差(accuracy)が25m以上ある曖昧な信号は、ワープの原因になるため完全に捨てる
+                if (accuracy > 25) {
+                    ui.status.innerHTML = `<span class="text-yellow-400 font-bold">⚠️ GPS精度が低いです(誤差${Math.round(accuracy)}m)。立ち止まって待機中...</span>`;
+                    return;
+                }
+
+                updatePosition(lat, lng, accuracy);
+            },
+            (error) => {
+                let errMsg = "GPSエラー";
+                if (error.code === 1) errMsg = "❌ ブラウザの『位置情報』が許可されていません";
+                if (error.code === 2) errMsg = "📡 電波が弱いです。外へ出てください";
+                if (error.code === 3) errMsg = "⏱️ GPSタイムアウト";
+                
+                ui.status.innerHTML = `<span class="text-red-400 font-bold">${errMsg}</span>`;
+            },
+            options
+        );
+    }
+
+    // --- Firebase 同期処理 ---
+    function drawCell(gridId, x, y, color, owner) {
+        if (gridData.has(gridId)) {
+            const existing = gridData.get(gridId);
+            if (existing.owner === owner && existing.color === color) return;
+            if (map) map.removeLayer(existing.rect);
+            if (colorScores[existing.color]) colorScores[existing.color]--;
+        }
+
+        const bounds = [[y * CELL_SIZE, x * CELL_SIZE], [(y + 1) * CELL_SIZE, (x + 1) * CELL_SIZE]];
+        const rect = L.rectangle(bounds, { color: color, weight: 0, fillColor: color, fillOpacity: 0.85, className: 'grid-cell' });
+        if (map) rect.addTo(map);
+
+        gridData.set(gridId, { rect, owner, color });
+        colorScores[color] = (colorScores[color] || 0) + 1;
+        
+        updateRanking();
+    }
+
+    function listenToCells() {
+        const cellsRef = ref(db, 'cells');
+        
+        // データが追加された時
+        onChildAdded(cellsRef, (data) => {
+            const val = data.val();
+            drawCell(data.key, val.x, val.y, val.color, val.owner);
+        });
+
+        // データが変更された時（誰かが色を上書きした時）
+        onChildChanged(cellsRef, (data) => {
+            const val = data.val();
+            drawCell(data.key, val.x, val.y, val.color, val.owner);
+        });
+    }
+
+    function updateRanking() {
+        const sorted = Object.entries(colorScores).filter(([_, count]) => count > 0).sort((a, b) => b[1] - a[1]);
+        ui.ranking.innerHTML = '';
+        if(sorted.length === 0) return ui.ranking.innerHTML = '<div class="text-center text-sm text-gray-500">No Data</div>';
+
+        sorted.forEach(([color, count], index) => {
+            const isMe = color === myColor;
+            const item = document.createElement('div');
+            item.className = `flex justify-between items-center p-1 rounded ${isMe ? 'bg-white/10' : ''}`;
+            item.innerHTML = `
+                <div class="flex items-center gap-2">
+                    <span class="text-[10px] text-gray-400 w-2">${index + 1}</span>
+                    <div class="w-2.5 h-2.5 rounded-full" style="background-color: ${color}"></div>
+                    <span class="text-[10px] ${isMe ? 'text-white font-bold' : 'text-gray-400'}">${isMe ? 'YOU' : 'P'+(index+1)}</span>
+                </div>
+                <span class="font-bold text-xs ${isMe ? 'text-white' : 'text-gray-300'}">${count}<span class="text-[8px] font-normal ml-0.5">マス</span></span>
+            `;
+            ui.ranking.appendChild(item);
+        });
+    }
+
+    // --- ボタン処理 ---
+    btns.modes.forEach(btn => btn.addEventListener('click', (e) => startGame(parseInt(e.target.dataset.time))));
+    btns.restart.addEventListener('click', () => location.reload());
+
+    // 起動
+    initSystem();
+
+</script>
+</body>
+</html>
